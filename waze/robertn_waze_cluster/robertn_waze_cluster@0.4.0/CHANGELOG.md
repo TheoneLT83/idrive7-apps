@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+The page's first row checks the two cluster display settings the map needs, read from the cluster (KombiIF statusConfigurationKombi5): "Central display area" Off and "Display assisted driving view when driver assistance is active" unticked. It names the one to change, says both are right, or keeps the note while the cluster has not answered.
+
 ## 0.3.1
 
 The first row of the page says that, for now, the map is stable only with

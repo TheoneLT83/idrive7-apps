@@ -24,6 +24,7 @@
 
 const OnlineApp = require('oap-sdk/src/core/OnlineApp.js');
 const logging = require('oap-sdk/src/logging/logging');
+const someipBuilders = require('oap-sdk/src/someip/someipBuilders');
 const { WazeClusterControl, MAX_LINES } = require('./waze_cluster_control.js');
 
 const logger = logging.getSDKLogger();
@@ -39,8 +40,28 @@ const ROW_NAMES = Array.from({ length: MAX_LINES }, (_, i) => `wocRow${String(i 
 const LIST_RENDER_MS = 500;
 const ROW_CHARS = 90;
 const PRESS_DEDUPE_MS = 400;
-// the list's first row, above the log: the cluster setting the map needs to stay stable for now
-const NOTE = 'For a stable map: set the cluster display\'s assisted driving view to "Deactivated"';
+// the list's first row, above the log: the cluster settings the map needs to stay stable for now, checked against
+// the cluster's own report (KombiIF statusConfigurationKombi5, recorded on a G20): the central display area
+// (statusNavigationDisplayType) Off and "Display assisted driving view when driver assistance is active" unticked
+// (statusActivationInstrumentPackContent2 bit 21 clear). NOTE until the cluster answers.
+const NOTE = 'Stable map needs: cluster Central display area Off, assisted driving view unticked';
+const IF_KOMBI = 'de.bmw.infotainment.KombiIF';
+const CENTRAL_OFF = 'ANZEIGE_RADIOBUTTON_AUS_AKTIV';
+const ASSISTED_VIEW_BIT = 1 << 21;
+
+/* The first row for the cluster's settings report, or null while it is not known. */
+function clusterRow(cfg) {
+    if (!cfg || typeof cfg.statusNavigationDisplayType !== 'string' ||
+            typeof cfg.statusActivationInstrumentPackContent2 !== 'number') {
+        return null;
+    }
+    const centralOff = cfg.statusNavigationDisplayType === CENTRAL_OFF;
+    const assisted = (cfg.statusActivationInstrumentPackContent2 & ASSISTED_VIEW_BIT) !== 0;
+    if (centralOff && !assisted) return 'Cluster settings OK: Central display area Off, assisted driving view unticked';
+    if (!centralOff && assisted) return 'Map unstable: cluster Central display area to Off, untick assisted driving view';
+    if (!centralOff) return 'Map unstable: set the cluster display\'s Central display area to Off';
+    return 'Map unstable: untick the cluster display\'s "Display assisted driving view"';
+}
 
 /* A line as one row: no line breaks, at most ROW_CHARS characters. */
 function oneRow(line) {
@@ -65,6 +86,7 @@ class WazeClusterApp extends OnlineApp {
         this._sawForeground = false;
         this._shutdownPromise = null;
         this._listTimer = null;
+        this._clusterRow = null;
         this._control = new WazeClusterControl({ log: logger });
         this._control.on('change', () => {
             this._render();
@@ -93,6 +115,7 @@ class WazeClusterApp extends OnlineApp {
             return this.initialized();
         }
         const foregroundStart = this._startedForeground();
+        this._setupClusterCheck();
         return this._setupRhmi()
             .then(() => this._registerEntryPoints())
             .then(() => {
@@ -323,6 +346,27 @@ class WazeClusterApp extends OnlineApp {
         this._setEnabled(RESTART_NAME, needsRestart && patch && !restarting);
     }
 
+    /* The cluster's display settings (KombiIF statusConfigurationKombi5): read at start and on each change. Without
+     * them the first row keeps NOTE. */
+    _setupClusterCheck() {
+        let proxy;
+        const take = (v) => {
+            const row = clusterRow(v);
+            if (row !== this._clusterRow) {
+                this._clusterRow = row;
+                logger.info(`cluster settings: ${row || 'unknown'}`);
+                this._scheduleLists();
+            }
+        };
+        someipBuilders.buildTypedProxy(IF_KOMBI, '1')
+            .then((p) => { proxy = p; return proxy.init(); })
+            .then(() => proxy.waitUntilAvailable())
+            .then(() => proxy.statusConfigurationKombi5.subscribe(take))
+            .then(() => proxy.statusConfigurationKombi5.getValue())
+            .then(take)
+            .catch((err) => logger.warn(`cluster settings unavailable: ${err && err.message}`));
+    }
+
     _scheduleLists() {
         if (!this._listTimer) {
             this._listTimer = setTimeout(() => {
@@ -338,7 +382,7 @@ class WazeClusterApp extends OnlineApp {
         }
         /* Rows are only written, never hidden: on this HMI a row hidden at
          * run time leaves the page without its other rows (mgu-emulator). */
-        const rows = [NOTE].concat(this._control.rows());
+        const rows = [this._clusterRow || NOTE].concat(this._control.rows());
         ROW_NAMES.forEach((name, i) => this._write(name, oneRow(rows[i] || '')));
     }
 

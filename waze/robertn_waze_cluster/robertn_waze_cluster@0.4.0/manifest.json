@@ -1,5 +1,13 @@
 {
   "proxies": {
+    "de.bmw.infotainment.KombiIF": {
+      "instances": [
+        "1"
+      ],
+      "attributes": {
+        "statusConfigurationKombi5": "rs"
+      }
+    },
     "de.bmw.infotainment.telematic.oapcontroller.OAPController": "*",
     "de.bmw.infotainment.hmi.remote.RemoteHmi": "*",
     "de.bmw.infotainment.hmi.remote.RemoteHmiApplication": "*",
