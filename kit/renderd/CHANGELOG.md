@@ -1,5 +1,9 @@
 # mgu-render changelog
 
+## idrive7-apps mgu-renderd 2.1.6
+
+- An HMI surface makes the layer apps yield the screen only while it is visible and has a size (its configuration). The camera / driver-assistance video (dasvideo, surface 0x198) can stay visible at 0x0 on no layer from boot, showing nothing: every app and the Store were then hidden until the next reboot (seen on the car: "surface 0x198 visible: layer apps yield the screen" at start, never hidden again).
+
 ## idrive7-apps mgu-renderd 2.1.5
 
 - An app's layer taken off the centre screen while its app is shown (the compositor reports it: the layer's `screen` event with no output) goes straight back on, on top. The HMI's scene or the app manager's in-place update of another app could set the screen's layers without it while it stayed visible: a blank page until the app was shown again (seen on the car: the Store blank after it updated an app).
