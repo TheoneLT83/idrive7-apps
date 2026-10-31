@@ -191,6 +191,7 @@ void touch_stop(void) { if (loaded) rule_out(); loaded = 0; }
 static int route_finger(const unsigned char *p)
 {
     int x = be16(p + 38), y = be16(p + 44), ev = (p[47] >> 4) & 3;
+    touch_unmap(&x, &y);                         /* where the HMI shows smaller or larger than its design size */
     /* every DOWN starts a gesture (one finger): an UP we never saw - the rule went (HMI touched, app gone) or a
      * lost datagram - must not hand the next gesture to the last owner */
     if (ev == DOWN) {
