@@ -48,6 +48,10 @@ What stays as it was:
   still go to the HMI's own screen underneath, and its buttons sit where they always were.
 - **Fallback.** If the socket `/run/mgu-renderd/renderd.sock` is missing, or the setting
   *Renderer = Software* is chosen, apps draw in software as before. Same code, same look.
+- **Screen size.** Apps lay out on the HMI's design size, 1920 x 720 (the size READY reports). The
+  renderer follows where the compositor shows the HMI's own surface and maps the apps' layers (and
+  touch) onto it, so on a smaller, larger or offset screen (an iDrive 6 retrofit, an 8.8" display)
+  the apps line up with the HMI as on a 1920 x 720 one. The log line `screen: ...` shows the mapping.
 - **Full screen** (app setting *Screen layout*, default *Full screen*). The surface covers the
   whole 1920 x 720 screen right of the HMI's back-arrow column:
   - a header in the HMI's title strip with the app's name and page tabs (`G.frame`); the HMI's

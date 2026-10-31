@@ -1,7 +1,22 @@
 # mgu-render changelog
 
-## idrive7-apps mgu-renderd 2.1.6
+## idrive7-apps mgu-renderd 2.1.7
 
+- Apps fit the screen the HMI is shown on. The renderer finds the HMI's own surface (by its process, `hmi_process`)
+  and follows where the compositor shows it and at what size; apps still lay out on the HMI's design size (1920 x
+  720, or 2880 x 960 when the HMI's buffer has that size) and their layers are scaled and moved onto the HMI's
+  rectangle, so they line up with the HMI's title strip, back column and status icons wherever it is: an iDrive 6
+  retrofit's or an 8.8" screen, a custom display, the HMI centred on a larger one. Touch is mapped back to the
+  design size. Before, everything was placed in 1920 x 720 screen px and ran off a smaller screen (issue #42).
+  Until the HMI's surface is there, the centre output's mode is used, as before. In-page drawing (embed) is offered
+  only while the HMI's buffer has the design size. The log names every output, the HMI's surface with its buffer
+  and position, and the mapping (`screen: ...`). `ivi-probe dst <surface> x y w h` moves a surface, to try a
+  screen size on the VM.
+- 2.1.5 reverted: an app's layer is no longer put straight back when the HMI takes it off the screen. The HMI
+  takes it off on purpose when it draws over a shown app (camera, call, popup, its own screens) and sets its layers
+  again on each change of its scene, so the two kept undoing each other: the screen swapped between the HMI and the
+  app (seen on a car; reproduced on the VM). As in 2.1.4 the layer goes back on top each time the app is shown;
+  an app taken off while shown (the Store updating another app) stays blank until it is opened again.
 - An HMI surface makes the layer apps yield the screen only while it is visible and has a size (its configuration). The camera / driver-assistance video (dasvideo, surface 0x198) can stay visible at 0x0 on no layer from boot, showing nothing: every app and the Store were then hidden until the next reboot (seen on the car: "surface 0x198 visible: layer apps yield the screen" at start, never hidden again).
 
 ## idrive7-apps mgu-renderd 2.1.5

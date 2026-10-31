@@ -94,7 +94,28 @@ static EGLDisplay edpy;
 static EGLConfig ecfg;
 static EGLContext ectx;
 static EGLSurface init_es = EGL_NO_SURFACE;
+/* The screen apps are told (READY) and lay out on: the HMI's design size, 1920 x 720 (iDrive 7) or 2880 x 960
+ * (iDrive 8). The HMI may show smaller or larger than that (an iDrive 6 retrofit's screen, an 8.8" display, a
+ * custom one): what apps place in design px is mapped onto the rectangle the HMI covers on the screen. */
 static int screen_w = 1920, screen_h = 720, refresh_mhz;
+static int out_w, out_h;                    /* the centre output's current mode */
+/* the HMI's own surface (found by its process): where the compositor shows it and its buffer's size */
+static struct { uint32_t id; struct ivi_controller_surface *s; int dst[4], buf[2]; } hmi;
+/* design px -> screen px */
+static float map_kx = 1, map_ky = 1;
+static int map_ox, map_oy;
+static void geom_update(void);
+static void map_rect(int x, int y, int w, int h, int r[4]) {
+    int x0 = (int)lroundf((float)map_ox + (float)x * map_kx), y0 = (int)lroundf((float)map_oy + (float)y * map_ky);
+    r[0] = x0; r[1] = y0;
+    r[2] = (int)lroundf((float)map_ox + (float)(x + w) * map_kx) - x0;
+    r[3] = (int)lroundf((float)map_oy + (float)(y + h) * map_ky) - y0;
+}
+/* a touch on the screen, in design px (touch.c) */
+void touch_unmap(int *x, int *y) {
+    *x = (int)lroundf(((float)*x - (float)map_ox) / map_kx);
+    *y = (int)lroundf(((float)*y - (float)map_oy) / map_ky);
+}
 
 /* yield surfaces (camera, video): layer mode hides while one is visible */
 /* an HMI surface the layer apps yield to: visible and with a size (its configuration); a visible 0x0 one shows nothing */
@@ -212,8 +233,78 @@ static const struct ivi_controller_surface_listener yield_listener = {
     y_visibility, y_opacity, y_rect, y_rect, y_config, y_int, y_int, y_layer, y_stats, y_destroyed, y_int,
 };
 
+/* The HMI's surface: each surface the compositor reports (until the HMI's is known) is asked for its process;
+ * its position and buffer size come first, so they are kept until the answer says whose it is. */
+#define MAX_PROBES 32
+static struct { uint32_t id; struct ivi_controller_surface *s; int dst[4], buf[2]; } probes[MAX_PROBES];
+static void p_none(void *d, struct ivi_controller_surface *s, int32_t v) { (void)d, (void)s, (void)v; }
+static void p_opacity(void *d, struct ivi_controller_surface *s, wl_fixed_t o) { (void)d, (void)s, (void)o; }
+static void p_src(void *d, struct ivi_controller_surface *s, int32_t x, int32_t y, int32_t w, int32_t h) { (void)d, (void)s, (void)x, (void)y, (void)w, (void)h; }
+static void p_dst(void *d, struct ivi_controller_surface *s, int32_t x, int32_t y, int32_t w, int32_t h) {
+    int i = (int)(intptr_t)d;
+    if (s == hmi.s) {
+        if (hmi.dst[0] == x && hmi.dst[1] == y && hmi.dst[2] == w && hmi.dst[3] == h) return;
+        hmi.dst[0] = x; hmi.dst[1] = y; hmi.dst[2] = w; hmi.dst[3] = h;
+        geom_update();
+    } else if (i >= 0 && probes[i].s == s) { probes[i].dst[0] = x; probes[i].dst[1] = y; probes[i].dst[2] = w; probes[i].dst[3] = h; }
+}
+static void p_config(void *d, struct ivi_controller_surface *s, int32_t w, int32_t h) {
+    int i = (int)(intptr_t)d;
+    if (s == hmi.s) {
+        if (hmi.buf[0] == w && hmi.buf[1] == h) return;
+        hmi.buf[0] = w; hmi.buf[1] = h;
+        geom_update();
+    } else if (i >= 0 && probes[i].s == s) { probes[i].buf[0] = w; probes[i].buf[1] = h; }
+}
+static void p_layer(void *d, struct ivi_controller_surface *s, struct ivi_controller_layer *l) { (void)d, (void)s, (void)l; }
+static void p_stats(void *d, struct ivi_controller_surface *s, uint32_t a, uint32_t b, uint32_t c, uint32_t pid, const char *n) {
+    (void)a, (void)b, (void)c;
+    int i = (int)(intptr_t)d;
+    if (i < 0 || probes[i].s != s) return;
+    const char *base = n ? strrchr(n, '/') : NULL;
+    base = base ? base + 1 : n ? n : "";
+    if (!hmi.s && !strcmp(base, cfg.hmi_process)) {
+        hmi.id = probes[i].id; hmi.s = s;
+        memcpy(hmi.dst, probes[i].dst, sizeof hmi.dst); memcpy(hmi.buf, probes[i].buf, sizeof hmi.buf);
+        log_info("the HMI's surface %u (%s, pid %u): buffer %dx%d shown at %d,%d %dx%d", hmi.id, base, pid,
+                 hmi.buf[0], hmi.buf[1], hmi.dst[0], hmi.dst[1], hmi.dst[2], hmi.dst[3]);
+        probes[i].s = NULL;
+        geom_update();
+        return;
+    }
+    probes[i].s = NULL;
+    ivi_controller_surface_destroy(s, 0);                 /* our handle only: the surface stays */
+}
+static void p_destroyed(void *d, struct ivi_controller_surface *s) {
+    int i = (int)(intptr_t)d;
+    if (s == hmi.s) {
+        log_info("the HMI's surface %u is gone", hmi.id);
+        memset(&hmi, 0, sizeof hmi);
+        geom_update();
+    } else if (i >= 0 && probes[i].s == s) probes[i].s = NULL;
+    wl_proxy_destroy((struct wl_proxy *)s);
+}
+static const struct ivi_controller_surface_listener probe_listener = {
+    p_none, p_opacity, p_src, p_dst, p_config, p_none, p_none, p_layer, p_stats, p_destroyed, p_none,
+};
+static void hmi_probe(struct ivi_controller *c, uint32_t id) {
+    if (hmi.s || (id >= SURF_BASE && id < SURF_BASE + MAX_CLIENTS)) return;
+    int k = -1;
+    for (int i = 0; i < MAX_PROBES; i++) {
+        if (probes[i].s && probes[i].id == id) return;     /* asked already */
+        if (!probes[i].s && k < 0) k = i;
+    }
+    if (k < 0) return;
+    memset(&probes[k], 0, sizeof probes[k]);
+    probes[k].id = id;
+    probes[k].s = ivi_controller_surface_create(c, id);
+    ivi_controller_surface_add_listener(probes[k].s, &probe_listener, (void *)(intptr_t)k);
+    ivi_controller_surface_send_stats(probes[k].s);
+}
+
 static void c_surface(void *d, struct ivi_controller *c, uint32_t id) {
     (void)d;
+    hmi_probe(c, id);
     for (int i = 0; i < cfg.n_yield; i++) {
         if (cfg.yield_surfaces[i] != id) continue;
         int k = 0;
@@ -237,8 +328,10 @@ static void o_geom(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t p
 }
 static void o_mode(void *d, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t r) {
     (void)o;
+    if (!(flags & WL_OUTPUT_MODE_CURRENT)) return;
+    log_info("output %d: %dx%d@%d", (int)(intptr_t)d, w, h, r / 1000);
     /* the first output is the centre display (HDMI-A-1 in winston's command line) */
-    if ((flags & WL_OUTPUT_MODE_CURRENT) && d == (void *)1) { screen_w = w; screen_h = h; refresh_mhz = r; log_debug("centre output %dx%d@%d", w, h, r / 1000); }
+    if (d == (void *)1) { out_w = w; out_h = h; refresh_mhz = r; geom_update(); }
 }
 static void o_done(void *d, struct wl_output *o) { (void)d, (void)o; }
 static void o_scale(void *d, struct wl_output *o, int32_t f) { (void)d, (void)o, (void)f; }
@@ -337,28 +430,6 @@ static void origin(const client *c, float *x, float *y) {
 }
 
 static struct ivi_controller_screen *centre_screen(void);
-
-/* The compositor reports the layer's screen: none means the screen's layers were set without it (the HMI's scene, an
- * app manager's in-place update of another app). While the app is shown it goes straight back on, on top - it would
- * stay visible but on no screen, a blank page until the app is shown again. */
-static void l_screen(void *d, struct ivi_controller_layer *l, struct wl_output *o) {
-    client *c = d;
-    if (o || !c->cl || c->cl != l || !c->layer_on) return;
-    struct ivi_controller_screen *scr = centre_screen();
-    if (!scr) return;
-    log_info("%s: layer taken off the screen while shown - put back", c->app);
-    ivi_controller_screen_add_layer(scr, c->cl);
-    ivi_controller_commit_changes(ictl);
-}
-static void l_int(void *d, struct ivi_controller_layer *l, int32_t v) { (void)d, (void)l, (void)v; }
-static void l_fixed(void *d, struct ivi_controller_layer *l, wl_fixed_t v) { (void)d, (void)l, (void)v; }
-static void l_rect(void *d, struct ivi_controller_layer *l, int32_t x, int32_t y, int32_t w, int32_t h) { (void)d, (void)l, (void)x, (void)y, (void)w, (void)h; }
-static void l_config(void *d, struct ivi_controller_layer *l, int32_t w, int32_t h) { (void)d, (void)l, (void)w, (void)h; }
-static void l_destroyed(void *d, struct ivi_controller_layer *l) { (void)d, (void)l; }
-static const struct ivi_controller_layer_listener layer_listener = {
-    l_int, l_fixed, l_rect, l_rect, l_config, l_int, l_screen, l_destroyed,
-};
-
 static void apply_visibility(client *c) {
     if (!c->cl) return;
     int on = shown(c);                                     /* never show an empty or dead surface */
@@ -493,10 +564,11 @@ static int surface_create(client *c) {
     ivi_controller_surface_set_source_rectangle(c->cs, 0, 0, c->w, c->h);
     ivi_controller_surface_set_destination_rectangle(c->cs, 0, 0, c->w, c->h);
     ivi_controller_surface_set_visibility(c->cs, 0);
-    c->cl = ivi_controller_layer_create(ictl, lid, screen_w, screen_h);
-    ivi_controller_layer_add_listener(c->cl, &layer_listener, c);
+    int m[4];                                            /* design px -> where the HMI shows */
+    map_rect(c->x, c->y, c->w, c->h, m);
+    c->cl = ivi_controller_layer_create(ictl, lid, out_w > 0 ? out_w : screen_w, out_h > 0 ? out_h : screen_h);
     ivi_controller_layer_set_source_rectangle(c->cl, 0, 0, c->w, c->h);
-    ivi_controller_layer_set_destination_rectangle(c->cl, c->x, c->y, c->w, c->h);
+    ivi_controller_layer_set_destination_rectangle(c->cl, m[0], m[1], m[2], m[3]);
     ivi_controller_layer_set_opacity(c->cl, wl_fixed_from_int(1));
     ivi_controller_layer_add_surface(c->cl, c->cs);
     ivi_controller_layer_set_visibility(c->cl, 0);
@@ -506,7 +578,8 @@ static int surface_create(client *c) {
     else log_warn("%s: no screen to put the layer on", c->app);
     ivi_controller_commit_changes(ictl);
     wl_display_roundtrip(dpy);
-    log_info("%s: surface 0x%x on layer 0x%x at %d,%d %dx%d (scale %.3f)", c->app, sid, lid, c->x, c->y, c->w, c->h, c->xf.s);
+    log_info("%s: surface 0x%x on layer 0x%x at %d,%d %dx%d (scale %.3f; on the screen %d,%d %dx%d)", c->app, sid, lid,
+             c->x, c->y, c->w, c->h, c->xf.s, m[0], m[1], m[2], m[3]);
     return 0;
 }
 
@@ -685,7 +758,9 @@ static int template_loaded(void) {
 static uint64_t t_listen;
 static int embed_settling(uint64_t t) { return cfg.embed && embed_connecting() && t - t_listen < 3000000; }
 
-static int embed_available(void) { return cfg.embed && embed_connected() && template_loaded(); }
+/* the HMI's page is in its buffer's px: apps' design px only when the buffer has the design size */
+static int embed_geometry(void) { return !hmi.s || !hmi.buf[0] || (hmi.buf[0] == screen_w && hmi.buf[1] == screen_h); }
+static int embed_available(void) { return cfg.embed && embed_connected() && template_loaded() && embed_geometry(); }
 
 /* ---------------- touch (touch.c asks) ---------------- */
 int touch_owner_at(int x, int y) {
@@ -835,10 +910,50 @@ static void app_area(int r[4]) {
     else { r[0] = 108; r[1] = 82; r[2] = 1790; r[3] = 638; }
 }
 
+static void send_ready(client *c);
 static void hello(client *c, const uint8_t *p, uint32_t len) {
     int native = hello_parse(p, len, c->app, sizeof c->app);
-    if (native) {
-        c->dialect = DIALECT_NATIVE;
+    if (native) c->dialect = DIALECT_NATIVE;
+    log_info("%s: connected (uid %u%s)", c->app, c->uid, native ? ", mgu-render/1" : "");
+    send_ready(c);
+}
+
+/* Where the HMI is, so apps fit it: the rectangle its surface covers on the screen (else its buffer, else the
+ * centre output). Apps lay out in the HMI's design size; that is mapped onto the rectangle. Placed apps move,
+ * and apps are told the new size when it changed. */
+static void geom_update(void) {
+    int r[4] = { 0, 0, out_w, out_h }, nat[2] = { out_w, out_h };
+    const char *from = "the centre output";
+    if (hmi.s && hmi.buf[0] >= 320 && hmi.buf[1] >= 120) { nat[0] = hmi.buf[0]; nat[1] = hmi.buf[1]; }
+    if (hmi.s && hmi.dst[2] >= 320 && hmi.dst[3] >= 120) { memcpy(r, hmi.dst, sizeof r); from = "the HMI"; }
+    else if (hmi.s && hmi.buf[0] >= 320 && hmi.buf[1] >= 120) { r[0] = r[1] = 0; r[2] = hmi.buf[0]; r[3] = hmi.buf[1]; from = "the HMI"; }
+    if (r[2] < 320 || r[3] < 120) return;                /* nothing known yet: 1920 x 720 as told */
+    int dw = 1920, dh = 720;                             /* the iDrive 7 HMI's design, whatever it is shown at */
+    if (nat[0] == 2880 && nat[1] == 960) { dw = 2880; dh = 960; }   /* iDrive 8 */
+    float kx = (float)r[2] / (float)dw, ky = (float)r[3] / (float)dh;
+    int moved = kx != map_kx || ky != map_ky || r[0] != map_ox || r[1] != map_oy, resized = dw != screen_w || dh != screen_h;
+    if (!moved && !resized) return;
+    map_kx = kx; map_ky = ky; map_ox = r[0]; map_oy = r[1];
+    screen_w = dw; screen_h = dh;
+    if (kx == 1 && ky == 1 && !r[0] && !r[1]) log_info("screen: %dx%d from %s", dw, dh, from);
+    else log_info("screen: apps lay out on %dx%d, shown at %d,%d %dx%d (%s; x %.3f, y %.3f)", dw, dh, r[0], r[1], r[2], r[3], from, kx, ky);
+    if (!dpy) return;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client *c = clients[i];
+        if (!c) continue;
+        if (moved && c->cl && c->placed) {
+            int m[4];
+            map_rect(c->x, c->y, c->w, c->h, m);
+            ivi_controller_layer_set_destination_rectangle(c->cl, m[0], m[1], m[2], m[3]);
+        }
+        /* our kit takes a second READY (it places again); other dialects get the size they were told */
+        if (resized && c->dialect == DIALECT_NATIVE) send_ready(c);
+    }
+    if (ictl) ivi_controller_commit_changes(ictl);
+}
+
+static void send_ready(client *c) {
+    if (c->dialect == DIALECT_NATIVE) {
         int emb = embed_available(), area[4];
         app_area(area);
         uint32_t caps = CAP_PIXMAP | CAP_VIDEO | (touch_on ? CAP_TOUCH_ROUTE : 0) | (cfg.foreground_gate[0] ? CAP_FRONT_GATE : 0) |
@@ -848,7 +963,6 @@ static void hello(client *c, const uint8_t *p, uint32_t len) {
         x[11] = GFX_PIXMAP_SIDE; x[12] = (uint32_t)refresh_mhz;
         send_msg(c, X_READY, x, 13 * 4);
     }
-    log_info("%s: connected (uid %u%s)", c->app, c->uid, native ? ", mgu-render/1" : "");
     uint32_t r[4] = { MGU_PROTO_VERSION, (uint32_t)screen_w, (uint32_t)screen_h, (uint32_t)touch_on };
     send_msg(c, E_READY, r, sizeof r);
 }
@@ -979,7 +1093,9 @@ static int handle(client *c, uint32_t type, const uint8_t *p, uint32_t len) {
             c->frames_shown = 0;
             if (c->mode == MODE_LAYER && surface_create(c) < 0) { send_error(c, "surface"); return -1; }
         } else if (c->mode == MODE_LAYER) {
-            ivi_controller_layer_set_destination_rectangle(c->cl, x, y, ww, hh);
+            int m[4];
+            map_rect(x, y, ww, hh, m);
+            ivi_controller_layer_set_destination_rectangle(c->cl, m[0], m[1], m[2], m[3]);
             ivi_controller_commit_changes(ictl);
         } else {
             c->dirty = c->frame_words > 0;
@@ -1530,7 +1646,9 @@ int main(int argc, char **argv) {
     wl_registry_add_listener(reg, &reg_listener, NULL);
     wl_display_roundtrip(dpy); wl_display_roundtrip(dpy);
     if (!comp || !iapp || !ictl) { log_error("compositor lacks wl_compositor / ivi_application / ivi_controller"); return 1; }
-    log_info("compositor: %d screens, centre output %dx%d", nscreens, screen_w, screen_h);
+    wl_display_roundtrip(dpy);                           /* the HMI's surface answers whose it is */
+    log_info("compositor: %d screens, centre output %dx%d, apps lay out on %dx%d", nscreens, out_w, out_h, screen_w, screen_h);
+    if (!hmi.s) log_info("the HMI's surface (%s) is not there yet: placed by the centre output until it is", cfg.hmi_process);
     /* forks the guard: before the GL driver loads */
     if (cfg.touch) touch_on = touch_start();
     if (egl_setup((EGLNativeDisplayType)dpy, 0) < 0) return 1;

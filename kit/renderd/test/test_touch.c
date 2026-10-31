@@ -13,6 +13,7 @@ static int sent[16][4], nsent, outside;
 int touch_owner_at(int x, int y) { return x >= 1000 ? 0 : -1; }     /* slot 0 claims x >= 1000 */
 void touch_send(int slot, int phase, int x, int y) { if (nsent < 16) { int *s = sent[nsent++]; s[0] = slot; s[1] = phase; s[2] = x; s[3] = y; } }
 void touch_outside(void) { outside++; }
+void touch_unmap(int *x, int *y) { (void)x, (void)y; }             /* the HMI at its design size */
 
 /* one touchscreen PDU: word type, finger count, first finger x/y, event (bits 4-5) with touch type (bits 6-7) */
 static size_t pdu(unsigned char *b, int word, int fingers, int x, int y, int ev, int ttype)
