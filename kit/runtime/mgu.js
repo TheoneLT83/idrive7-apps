@@ -528,6 +528,9 @@ async function runInner(impl) {
         /**
          * onScroll(fn): fn(dy) scrolls a page drawn with cv.scroll = true by dy px (+ = further down), from a
          * finger dragged on it or the controller turned while on it; returns false when already at that end.
+         * cv.scroll = { y, bar: { x, y, w, h } } for a list on the page (from y down) with its scroll bar: the
+         * controller goes through the page's targets over y (its buttons) before the list, and shows it is on
+         * the list with the bar in the colour of the selection (no frame round the page).
          */
         onScroll(fn) { display.onScroll = fn; },
         /**

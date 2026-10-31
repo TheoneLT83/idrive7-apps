@@ -227,12 +227,19 @@ class Display {
         this.closeSheet();
         if (this.onTab) try { Promise.resolve(this.onTab(i)).catch((e) => this.log.error('tab', e)); } catch (e) { this.log.error('tab', e); }
     }
-    /** What the controller's knob goes through, in order: the header's tabs, the page's targets, the bar. */
+    /**
+     * What the controller's knob goes through, in order: the header's tabs, the page's targets, the bar. A
+     * scrolling page is one more place, before its targets; with cv.scroll = { y, bar } (a list on the page that
+     * scrolls, from y down) after the targets that end over y (the page's buttons over the list).
+     */
     _ring() {
         const tl = this._tabList();
         const tabs = tl.tabs.length > 1 || tl.settings >= 0 ? tl.tabs.map((x, i) => ({ k: 'tab:' + i, tab: i })) : [];
         const scroll = this.pageScroll && this.onScroll ? [{ k: 'scroll', scroll: true }] : [];
-        return tabs.concat(scroll, (this.pageTargets || []).map((q) => ({ k: 'tgt:' + q.key, tgt: q })), this.buttons().map((b) => ({ k: 'bar:' + b.id, bar: b.id })));
+        const tgts = (this.pageTargets || []).map((q) => ({ k: 'tgt:' + q.key, tgt: q }));
+        const top = this.pageScroll && this.pageScroll.y != null ? this.pageScroll.y : -Infinity;
+        const over = tgts.filter((p) => p.tgt.y + p.tgt.h <= top);
+        return tabs.concat(over, scroll, tgts.filter((p) => over.indexOf(p) < 0), this.buttons().map((b) => ({ k: 'bar:' + b.id, bar: b.id })));
     }
     /** HMI back (the controller pushed left): the app's screen closes as with the HMI's back arrow. */
     _back() {
@@ -612,7 +619,7 @@ class Display {
         if (!(r instanceof Recorder)) return softImage(name, r);
         if (r.chrome && r.chrome.tabs) this.tabInfo = r.chrome.tabs;
         else if (r.tabInfo) this.tabInfo = r.tabInfo;
-        if (!this.sheet) { this.pageTargets = r.targets || []; this.pageScroll = !!r.scroll; }
+        if (!this.sheet) { this.pageTargets = r.targets || []; this.pageScroll = r.scroll && typeof r.scroll === 'object' ? r.scroll : !!r.scroll; }
         // a sheet is over the page: the app's frames wait (the last one comes back when it closes)
         if (this.sheet && this.active() && this.place.full) {
             if (r.chrome) this.saved = Object.assign({}, this.saved || {}, {
@@ -771,7 +778,11 @@ class Display {
         const k = pl.scale, onPage = (key) => !this.sheet && key && (this.pageTargets || []).find((q) => 'tgt:' + q.key === key);
         const pt = onPage(this.focusKey), pp = Date.now() - this.pressedT < 300 && onPage(this.pressed);
         if (pp) c.roundRect(pp.x * k + pl.ox, pp.y * k + pl.oy, pp.w * k, pp.h * k, (pp.r != null ? pp.r : pp.h / 2) * k, G.withAlpha(t.sel || t.accent, 0.35));
-        if (this.focusKey === 'scroll' && this.pageScroll && !this.sheet) c.strokeRoundRect(hx + 6, FULL.headH + 6, W - hx - 12, H - this.barH() - FULL.headH - 12, 14, 3, G.withAlpha(t.sel || t.accent, 0.8));
+        // the controller on a page that scrolls: a frame round the page; on a list (cv.scroll = { y, bar }) its
+        // scroll bar in the colour of the selection (bar: where the page drew it, so it moves with the list)
+        const sb = this.focusKey === 'scroll' && !this.sheet && this.pageScroll;
+        if (sb === true) c.strokeRoundRect(hx + 6, FULL.headH + 6, W - hx - 12, H - this.barH() - FULL.headH - 12, 14, 3, G.withAlpha(t.sel || t.accent, 0.8));
+        else if (sb && sb.bar) c.roundRect((sb.bar.x - 2) * k + pl.ox, sb.bar.y * k + pl.oy, (sb.bar.w + 4) * k, sb.bar.h * k, (sb.bar.w / 2 + 2) * k, t.sel || t.accent);
         if (pt) c.strokeRoundRect(pt.x * k + pl.ox - 5, pt.y * k + pl.oy - 5, pt.w * k + 10, pt.h * k + 10, (pt.r != null ? pt.r : pt.h / 2) * k + 5, 3, t.sel || t.accent);
         // the strip's bottom edge continues under the see-through part
         c.fillRect(sx, 0, W - sx, FULL.headH, HMI.headBg);

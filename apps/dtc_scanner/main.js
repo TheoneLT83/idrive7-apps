@@ -10,7 +10,8 @@
  *   Check Control: the active messages from CheckControlMaster, named via the
  *           cluster's KombiInterface_2 lists.
  *
- * Pages: faults (6 per page) -> Check Control -> control units that answered.
+ * Pages: faults (6 per page) -> Check Control -> control units that answered. Where the kit runs the
+ * screen, all the faults are on one page and each list scrolls (a finger, or the controller turned on it).
  * Fault codes are BMW hex codes (as BMW's diagnostic tools show them); the head unit has no
  * text database for them, so look them up by code + control unit.
  */
@@ -296,10 +297,22 @@ mgu.run({
         /* ---------- drawing ---------- */
         let page = 0;
         let perPage = PER_PAGE;          // faults on a page: one more where the screen has room below the page (render)
+        let scrolls = false;             // where the kit runs the screen: one Faults page, each list scrolled (render)
+        let gliding = false;             // a list still gliding to where it was scrolled: draw the next frame too
+        const scroll = { faults: { y: 0, max: 0 }, cc: { y: 0, max: 0 }, ecus: { y: 0, max: 0 } };
         let only = null;                 // a control unit tapped on the Control units page: the Faults page lists its faults alone
         const faults = () => (scan ? [].concat(...scan.ecus.map((e) => e.dtcs.map((d) => Object.assign({ addr: e.addr }, d)))) : []);
         const listed = () => (only === null ? faults() : faults().filter((d) => d.addr === only));
-        const pageCount = () => Math.max(1, Math.ceil(listed().length / perPage)) + 2;
+        const pageCount = () => (scrolls ? 1 : Math.max(1, Math.ceil(listed().length / perPage))) + 2;
+        const shownList = () => { const fp = pageCount() - 2; return page < fp ? scroll.faults : page === fp ? scroll.cc : scroll.ecus; };
+        // a finger dragged on the page or the controller turned on it (cv.scroll): the list shown moves
+        ctx.onScroll((dy) => {
+            const s = shownList(), y = G.clamp(s.y + dy, 0, s.max), moved = y !== s.y;
+            s.y = y;
+            if (moved) changed();
+            return moved;
+        });
+        const showOnly = (addr) => { only = addr; page = 0; scroll.faults.y = 0; changed(); };
         const when = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, '0'); return p(d.getDate()) + '.' + p(d.getMonth() + 1) + '. ' + p(d.getHours()) + ':' + p(d.getMinutes()); };
         const ccList = () => (scan && scan.demo ? DEMO.cc : Array.from(cc.entries()).map(([id, m]) => Object.assign({ id }, m, ccNames.get(id) || {})));
 
@@ -353,13 +366,38 @@ mgu.run({
             return p;
         }
 
+        /**
+         * A list in panel p scrolled by s (scroll.<list>): its content from y top (unscrolled) to `bottom` px
+         * further down, cut to the panel from y clipTop. draw(sy, from, to) draws it moved up by sy, the rows
+         * between from and to only. Where nothing scrolls (no renderer to run the screen) the list draws as it
+         * is: paged.
+         */
+        function scrolled(cv, t, p, s, key, clipTop, top, bottom, draw) {
+            if (!scrolls) { draw(0); return; }
+            const end = p.y + p.h - 12;                  // the list's last row ends 12 over the panel's bottom
+            s.max = Math.max(0, top + bottom - end);
+            s.y = G.clamp(s.y, 0, s.max);
+            const sy = G.smooth('dtcScroll:' + key, s.y, 22);
+            if (sy !== s.y) gliding = true;
+            cv.clip(p.x, clipTop, p.w, p.y + p.h - 4 - clipTop);
+            draw(sy, clipTop, p.y + p.h - 4);
+            cv.noclip();
+            if (!s.max) return;
+            // where the list is: a bar at the panel's right edge
+            const vis = end - clipTop, bh = Math.max(40, vis * vis / (vis + s.max));
+            const bar = { x: p.x + p.w - 11, y: clipTop + (vis - bh) * sy / s.max, w: 6, h: bh };
+            cv.roundRect(bar.x, bar.y, bar.w, bar.h, 3, withAlpha(t.text, 0.3));
+            // the controller: the title's buttons first, then the list (its bar red while it is on it)
+            cv.scroll = { y: clipTop, bar };
+        }
+
         function drawFaults(cv, t) {
-            const f = listed(), pages = Math.max(1, Math.ceil(f.length / perPage));
+            const f = listed(), pages = scrolls ? 1 : Math.max(1, Math.ceil(f.length / perPage));
             const busy = phase === 'scanning' || phase === 'clearing';
             const p = listPanel(cv, t, (only === null ? 'Faults' : 'Faults  ' + ecuName(only)) + (pages > 1 ? '  ' + (page + 1) + '/' + pages : ''), [
                 { label: phase === 'scanning' ? 'Scanning...' : scan ? 'Scan again' : 'Scan now', run: () => doScan(), key: 'scan', busy },
                 { label: clearArmed ? 'Yes, clear' : 'Clear all', run: () => doClear(), key: 'clear', busy: busy || !faults().length, color: clearArmed ? t.crit : null },
-                only !== null && { label: 'All units', run: () => { only = null; page = 0; changed(); }, key: 'all' },
+                only !== null && { label: 'All units', run: () => showOnly(null), key: 'all' },
             ].filter(Boolean));
             const mid = Math.round((p.y + p.h - G.BOTTOM) / 2);     // the messages stay centred in a taller panel
             if (!scan) {
@@ -372,8 +410,10 @@ mgu.run({
                 cv.text(scan.ecus.length ? 'No faults stored' : 'No answer', 800, 433 + mid, 32, t.text, { align: 'center', font: 'bold' });
                 return;
             }
-            f.slice(page * perPage, page * perPage + perPage).forEach((d, i) => {
-                const y = 239 + i * 46;         // (room under the title's buttons: 10 px, as over them)
+            const rows = scrolls ? f : f.slice(page * perPage, page * perPage + perPage);
+            scrolled(cv, t, p, scroll.faults, 'faults', 233, 239, rows.length * 46 - 12, (sy, from, to) => rows.forEach((d, i) => {
+                const y = 239 + i * 46 - sy;    // (room under the title's buttons: 10 px, as over them)
+                if (y + 41 < from || y > to) return;
                 const s = statusInfo(d.status), col = t[s.sev] || t.dim;
                 cv.roundRect(48, y, 170, 34, 6, withAlpha(col, 0.22));
                 cv.text(s.label, 133, y + 25, 20, col, { align: 'center', font: 'bold', spacing: 0.5 });
@@ -385,8 +425,8 @@ mgu.run({
                 // Resolve diagnosis before layout; never reapply UI word substitution.
                 const diagnosticOptions = { literal: true };
                 if (txt) cv.text(fit(cv, txt, 22, 1552 - 680, diagnosticOptions), 680, y + 27, 22, t.dim, diagnosticOptions);
-                if (i < perPage - 1) cv.fillRect(48, y + 40, 1504, 1, withAlpha(t.tick, 0.25));
-            });
+                if (i < rows.length - 1) cv.fillRect(48, y + 40, 1504, 1, withAlpha(t.tick, 0.25));
+            }));
         }
 
         function drawCC(cv, t) {
@@ -394,14 +434,16 @@ mgu.run({
             const l = ccList();
             if (!l.length) { cv.text('No active Check Control messages', 800, 369 + Math.round(dy / 2), 30, t.dim, { align: 'center' }); return; }
             const COL = { RED: t.crit, YELLOW: t.warn, ORANGE: t.warn, GREEN: GO, WHITE: t.text };
-            l.slice(0, perPage).forEach((m, i) => {
-                const y = 231 + i * 47;
+            const rows = scrolls ? l : l.slice(0, perPage);
+            scrolled(cv, t, p, scroll.cc, 'cc', 229, 231, rows.length * 47 - 7, (sy, from, to) => rows.forEach((m, i) => {
+                const y = 231 + i * 47 - sy;
+                if (y + 41 < from || y > to) return;
                 cv.circle(66, y + 18, 9, COL[m.color] || t.dim);
                 cv.text(m.name ? diagnosticText(m.name) : translateUI('Message ') + m.id, 92, y + 27, 28, t.text, { font: 'bold', literal: true });
                 if (m.ecu !== undefined) cv.text(fit(cv, ecuName(m.ecu), 22, 420), 1552, y + 27, 22, t.dim, { align: 'right' });
-                if (i < perPage - 1) cv.fillRect(48, y + 40, 1504, 1, withAlpha(t.tick, 0.25));
-            });
-            if (l.length > perPage) cv.text('+ ' + (l.length - perPage) + ' more', 1552, 506 + dy, 22, t.dim, { align: 'right' });
+                if (i < rows.length - 1) cv.fillRect(48, y + 40, 1504, 1, withAlpha(t.tick, 0.25));
+            }));
+            if (l.length > rows.length) cv.text('+ ' + (l.length - rows.length) + ' more', 1552, 506 + dy, 22, t.dim, { align: 'right' });
         }
 
         function drawEcus(cv, t) {
@@ -409,10 +451,11 @@ mgu.run({
             const l = scan ? scan.ecus.slice().sort((a, b) => a.addr - b.addr) : [];
             if (!l.length) { cv.text(scan ? 'No control unit answered' : 'Scan first', 800, 369 + Math.round(dy / 2), 30, t.dim, { align: 'center' }); return; }
             const cols = 5, cw = 296, ch = 55;
-            // a taller panel: another row of units where one fits whole; the grid stays compact
-            const rows = 5 + Math.floor(dy / ch);
-            l.slice(0, cols * rows).forEach((e, i) => {
-                const x = 48 + (i % cols) * (cw + 8), y = 233 + Math.floor(i / cols) * ch;
+            // a taller panel: another row of units where one fits whole; the grid stays compact (scrolled: all of them)
+            const shown = scrolls ? l : l.slice(0, cols * (5 + Math.floor(dy / ch)));
+            scrolled(cv, t, p, scroll.ecus, 'ecus', 229, 233, Math.ceil(shown.length / cols) * ch - 6, (sy, from, to) => shown.forEach((e, i) => {
+                const x = 48 + (i % cols) * (cw + 8), y = 233 + Math.floor(i / cols) * ch - sy;
+                if (y + ch < from || y > to) return;
                 const act = e.dtcs.some((d) => d.status & 1), n = e.dtcs.length;
                 const col = act ? t.crit : n ? t.warn : GO;
                 cv.roundRect(x, y, cw, ch - 6, 6, withAlpha(col, 0.12));
@@ -421,17 +464,21 @@ mgu.run({
                 if (e.nrc) cv.text(NRC[e.nrc] || 'NRC ' + hex(e.nrc), x + 18, y + 44, 20, t.dim);
                 cv.text(n ? n + (n === 1 ? ' fault' : ' faults') : 'OK', x + cw - 12, y + 32, 22, col, { align: 'right', font: 'bold' });
                 // tapped (or pressed with the controller): the Faults page with this unit's faults alone
-                if (cv.own) cv.target(x, y, cw, ch - 6, () => { only = e.addr; page = 0; changed(); }, 'ecu' + e.addr, 6);
-            });
+                // (scrolled: the part of the tile in the panel, if it shows enough of it)
+                const ty = Math.max(y, from), th = Math.min(y + ch - 6, to) - ty;
+                if (cv.own && th >= 20) cv.target(x, ty, cw, th, () => showOnly(e.addr), 'ecu' + e.addr, 6);
+            }));
         }
 
         let drawn = -1;
         async function render(force) {
-            if (!force && drawn === version && phase !== 'scanning' && phase !== 'clearing') return;
+            if (!force && drawn === version && !gliding && phase !== 'scanning' && phase !== 'clearing') return;
             drawn = version;
+            gliding = false;
             const t = ctx.theme();
             const cv = ctx.canvas(W, H).clear(t.bg);
             const fp0 = pageCount() - 2;
+            scrolls = !!cv.own;
             perPage = PER_PAGE + Math.floor((G.pageBottom(cv) - G.BOTTOM) / 47);     // rows of 47 px (drawCC; drawFaults' are 46)
             const fp = pageCount() - 2;
             // fewer or more fault pages now (the room below the page came or went): Check Control and Control
