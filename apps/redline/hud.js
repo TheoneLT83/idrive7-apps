@@ -290,10 +290,16 @@ function optsFrom(settings, drive) {
  */
 function driveModeOf(raw) {
     if (raw === undefined || raw === null) return null;
+    // a plug-in hybrid's modes and Adaptive count as Comfort (only Sport and XtraBoost are Sport): wire numbers
+    // 10 Adaptive, 15/16/23 PHEV Sport, 17-22 PHEV Hybrid / Electric / battery control, 28 Boost
     const n = Number(raw);
-    if (!isNaN(n) && String(raw).trim() !== '') return n >= 1 && n <= 3 ? 'sport' : n >= 4 && n <= 6 ? 'comfort' : n >= 7 && n <= 9 ? 'eco' : null;
+    if (!isNaN(n) && String(raw).trim() !== '') {
+        return (n >= 1 && n <= 3) || n === 15 || n === 16 || n === 23 || n === 28 ? 'sport'
+            : (n >= 4 && n <= 6) || n === 10 || (n >= 17 && n <= 22) ? 'comfort' : n >= 7 && n <= 9 ? 'eco' : null;
+    }
     const s = String(raw).toUpperCase();
-    return /SPORT/.test(s) ? 'sport' : /ECO/.test(s) ? 'eco' : /COMFORT|TRAFFIC/.test(s) ? 'comfort' : null;
+    return /SPORT|BOOST/.test(s) ? 'sport' : /HYBRID|ELECTRIC|BATTERY|ADAPTIV/.test(s) ? 'comfort' : /ECO/.test(s) ? 'eco'
+        : /COMFORT|TRAFFIC/.test(s) ? 'comfort' : null;
 }
 /**
  * What the HUD does in this driving mode (setting hudComfort): 'all', 'lights' (shift lights, rev
